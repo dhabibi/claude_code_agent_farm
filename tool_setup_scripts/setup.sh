@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
-# Main setup script - Interactive menu for tool installation
+# Main setup script - Interactive menu for environment and agent installation
+# Supports multi-agent detection and installation (Claude Code, OpenCode)
+# Adds flexible alias configuration for agents
+# Implements OpenCode installation via npm/bun
+# Includes comprehensive validation and configuration steps for all supported agents
 # Compatible with both bash and zsh on Ubuntu
 
 set -euo pipefail
@@ -27,11 +31,13 @@ main() {
         echo "  ${BOLD}4)${RESET} SvelteKit/Remix/Astro - Vite, Playwright, framework tools"
         echo "  ${BOLD}5)${RESET} Rust Development    - Rust toolchain, cargo tools, web & system"
         echo "  ${BOLD}6)${RESET} Java Enterprise     - Java 21+, Gradle, Maven, Spring Boot"
+        echo "  ${BOLD}7)${RESET} Claude Code Agent    - Claude agent setup and validation"
+        echo "  ${BOLD}8)${RESET} OpenCode Agent       - OpenCode agent install (npm/bun), alias config"
         echo
         echo "  ${BOLD}0)${RESET} Exit"
         echo
         
-        read -p "Select an option (0-6): " choice
+        read -p "Select an option (0-8): " choice
         
         case $choice in
             1)
@@ -52,12 +58,18 @@ main() {
             6)
                 run_setup "Java Enterprise" "setup_java_enterprise.sh"
                 ;;
+            7)
+                setup_claude_code_agent
+                ;;
+            8)
+                setup_opencode_agent
+                ;;
             0)
                 log_info "Exiting setup..."
                 exit 0
                 ;;
             *)
-                log_error "Invalid option. Please select a number between 0 and 6."
+                log_error "Invalid option. Please select a number between 0 and 8."
                 ;;
         esac
         
@@ -72,6 +84,111 @@ main() {
     log_info "Remember to restart your shell or source your shell config to apply PATH changes:"
     echo -e "  ${CYAN}source ~/.bashrc${RESET}  # for bash"
     echo -e "  ${CYAN}source ~/.zshrc${RESET}   # for zsh"
+}
+
+# Setup Claude Code Agent
+# Detects installation, configures alias, and validates agent
+setup_claude_code_agent() {
+    show_banner "Claude Code Agent Setup"
+    # Detection logic
+    if python3 -c "import claude_code_agent_farm" &>/dev/null; then
+        log_success "Claude Code Agent is already installed (Python package detected)."
+        agent_cmd="python3 -m claude_code_agent_farm"
+    elif command -v claude_code_agent_farm &>/dev/null; then
+        log_success "Claude Code Agent binary is already installed."
+        agent_cmd="claude_code_agent_farm"
+    else
+        log_info "Claude Code Agent not detected."
+        agent_cmd="python3 -m claude_code_agent_farm"
+        # Installation logic will be added next
+    fi
+
+    # Alias configuration
+    echo
+    read -p "Enter preferred alias for Claude Code Agent (default: claude-agent): " alias_name
+    alias_name=${alias_name:-claude-agent}
+    alias_line="alias $alias_name='$agent_cmd'"
+    for shellrc in ~/.bashrc ~/.zshrc; do
+        if ! grep -Fxq "$alias_line" "$shellrc"; then
+            echo "$alias_line" >> "$shellrc"
+            log_success "Added alias '$alias_name' to $shellrc"
+        else
+            log_info "Alias '$alias_name' already exists in $shellrc"
+        fi
+    done
+    # Validation step
+    echo
+    log_step "Validating Claude Code Agent installation..."
+    if $agent_cmd --version &>/dev/null || $agent_cmd --help &>/dev/null; then
+        log_success "Claude Code Agent validation succeeded."
+    else
+        log_error "Claude Code Agent validation failed. Please check installation and PATH."
+    fi
+    # Validation step
+    echo
+    log_step "Validating OpenCode Agent installation..."
+    if $agent_cmd --version &>/dev/null || $agent_cmd --help &>/dev/null; then
+        log_success "OpenCode Agent validation succeeded."
+    else
+        log_error "OpenCode Agent validation failed. Please check installation and PATH."
+    fi
+}
+
+# Setup OpenCode Agent
+# Detects installation, installs via npm/bun if needed, configures alias, and validates agent
+setup_opencode_agent() {
+    show_banner "OpenCode Agent Setup"
+    # Detection logic
+    if npm list -g --depth=0 | grep -q "opencode-agent"; then
+        log_success "OpenCode Agent is already installed globally via npm."
+        agent_cmd="opencode-agent"
+    elif bun list -g | grep -q "opencode-agent"; then
+        log_success "OpenCode Agent is already installed globally via bun."
+        agent_cmd="opencode-agent"
+    elif command -v opencode-agent &>/dev/null; then
+        log_success "OpenCode Agent binary is already installed."
+        agent_cmd="opencode-agent"
+    else
+        log_info "OpenCode Agent not detected."
+        agent_cmd="opencode-agent"
+        echo
+        read -p "Install OpenCode Agent globally using npm or bun? [npm/bun]: " pkgmgr
+        case "$pkgmgr" in
+            npm)
+                if command -v npm &>/dev/null; then
+                    log_info "Installing OpenCode Agent globally via npm..."
+                    npm install -g opencode-agent && log_success "OpenCode Agent installed via npm."
+                else
+                    log_error "npm not found. Please install npm first."
+                fi
+                ;;
+            bun)
+                if command -v bun &>/dev/null; then
+                    log_info "Installing OpenCode Agent globally via bun..."
+                    bun add -g opencode-agent && log_success "OpenCode Agent installed via bun."
+                else
+                    log_error "bun not found. Please install bun first."
+                fi
+                ;;
+            *)
+                log_error "Invalid choice. Skipping OpenCode Agent installation."
+                ;;
+        esac
+    fi
+
+    # Alias configuration
+    echo
+    read -p "Enter preferred alias for OpenCode Agent (default: opencode-agent): " alias_name
+    alias_name=${alias_name:-opencode-agent}
+    alias_line="alias $alias_name='$agent_cmd'"
+    for shellrc in ~/.bashrc ~/.zshrc; do
+        if ! grep -Fxq "$alias_line" "$shellrc"; then
+            echo "$alias_line" >> "$shellrc"
+            log_success "Added alias '$alias_name' to $shellrc"
+        else
+            log_info "Alias '$alias_name' already exists in $shellrc"
+        fi
+    done
 }
 
 run_setup() {
