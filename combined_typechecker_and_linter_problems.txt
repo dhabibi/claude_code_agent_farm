@@ -1,0 +1,138 @@
+$ mypy .
+claude_code_agent_farm.py:733: error: Incompatible types in assignment (expression has type "list[Any]", variable has type "None")  [assignment]
+Found 1 error in 1 file (checked 3 source files)
+
+
+$ ruff check .
+agents.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+  |
+1 | # agents.py
+2 |
+3 | from abc import ABC, abstractmethod
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+4 |
+5 | class BaseAgent(ABC):
+  |
+  = help: Organize imports
+
+agents.py:83:66: W292 [*] No newline at end of file
+   |
+81 |             return OpenCodeAgent(**kwargs)
+82 |         else:
+83 |             raise ValueError(f"Unknown agent type: {agent_type}")
+   |                                                                  ^ W292
+   |
+   = help: Add trailing newline
+
+claude_code_agent_farm.py:722:17: B007 Loop control variable `i` not used within loop body
+    |
+720 |         else:
+721 |             # Single-agent backward compatibility - use configured agent_type
+722 |             for i in range(self.agents):
+    |                 ^ B007
+723 |                 self.agent_objects.append(AgentFactory.create_agent(self.agent_type))
+    |
+    = help: Rename unused `i` to `_i`
+
+claude_code_agent_farm.py:1703:9: SIM114 [*] Combine `if` branches using logical `or` operator
+     |
+1701 |           if agent_cfg and "command" in agent_cfg:
+1702 |               launch_cmd = agent_cfg["command"]
+1703 | /         elif agent_cfg and agent_cfg.get("agent_type") == "open_code":
+1704 | |             launch_cmd = "opencode"
+1705 | |             # Add model selection for OpenCode
+1706 | |             model = agent_cfg.get("model", "github-copilot/gpt-4.1")
+1707 | |             launch_cmd = f"opencode --model {model}"
+1708 | |         elif agent_cfg and agent_cfg.get("type") == "open_code":
+1709 | |             launch_cmd = "opencode"
+1710 | |             # Add model selection for OpenCode
+1711 | |             model = agent_cfg.get("model", "github-copilot/gpt-4.1")
+1712 | |             launch_cmd = f"opencode --model {model}"
+     | |____________________________________________________^ SIM114
+1713 |           elif self.agent_type == "open_code":
+1714 |               launch_cmd = "opencode --model github-copilot/gpt-4.1"
+     |
+     = help: Combine `if` branches
+
+claude_code_agent_farm.py:1742:17: SIM105 Use `contextlib.suppress(Exception)` instead of `try`-`except`-`pass`
+     |
+1740 |               wait_after_cc = self.wait_after_cc
+1741 |               if agent_cfg and "wait_after_cc" in agent_cfg:
+1742 | /                 try:
+1743 | |                     wait_after_cc = float(agent_cfg["wait_after_cc"])
+1744 | |                 except Exception:
+1745 | |                     pass
+     | |________________________^ SIM105
+1746 |               if not restart:
+1747 |                   console.print(f"🛠  Agent {agent_id:02d}: launching {launch_cmd}, waiting {wait_after_cc}s...")
+     |
+     = help: Replace with `contextlib.suppress(Exception)`
+
+claude_code_agent_farm.py:1791:17: SIM102 Use a single `if` statement instead of nested `if` statements
+     |
+1789 |                       time.sleep(1.0)
+1790 |                   time.sleep(2.0)
+1791 | /                 if hasattr(self, "settings_backup_path") and self.settings_backup_path:
+1792 | |                     if self._restore_claude_settings():
+     | |_______________________________________________________^ SIM102
+1793 |                           console.print(f"[green]Settings restored for agent {agent_id} - retrying launch[/green]")
+1794 |                           time.sleep(2.0)
+     |
+     = help: Combine `if` statements using `and`
+
+test_opencode.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+   |
+ 4 |   """
+ 5 |
+ 6 | / import subprocess
+ 7 | | import sys
+ 8 | | import tempfile
+ 9 | | import os
+   | |_________^ I001
+10 |
+11 |   def test_opencode_basic():
+   |
+   = help: Organize imports
+
+test_opencode.py:8:8: F401 [*] `tempfile` imported but unused
+  |
+6 | import subprocess
+7 | import sys
+8 | import tempfile
+  |        ^^^^^^^^ F401
+9 | import os
+  |
+  = help: Remove unused import: `tempfile`
+
+test_opencode.py:25:27: W291 [*] Trailing whitespace
+   |
+23 |     # Test if OpenCode can use GPT-4.1
+24 |     result = subprocess.run([
+25 |         "opencode", "run", 
+   |                           ^ W291
+26 |         "--model", "github-copilot/gpt-4.1", 
+27 |         "What is 2+2?"
+   |
+   = help: Remove trailing whitespace
+
+test_opencode.py:26:45: W291 [*] Trailing whitespace
+   |
+24 |     result = subprocess.run([
+25 |         "opencode", "run", 
+26 |         "--model", "github-copilot/gpt-4.1", 
+   |                                             ^ W291
+27 |         "What is 2+2?"
+28 |     ], capture_output=True, text=True)
+   |
+   = help: Remove trailing whitespace
+
+test_opencode.py:127:21: W292 [*] No newline at end of file
+    |
+126 | if __name__ == "__main__":
+127 |     sys.exit(main())
+    |                     ^ W292
+    |
+    = help: Add trailing newline
+
+Found 11 errors.
+[*] 8 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).
