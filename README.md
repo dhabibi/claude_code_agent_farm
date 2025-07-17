@@ -51,7 +51,7 @@ This alias will be configured automatically by the setup script.
 ### 1. Clone and Setup
 
 ```bash
-git clone https://github.com/Dicklesworthstone/claude_code_agent_farm.git
+git clone https://github.com/dhabibi/claude_code_agent_farm.git
 cd claude_code_agent_farm
 chmod +x setup.sh
 ./setup.sh
