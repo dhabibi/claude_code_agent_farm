@@ -628,6 +628,8 @@ class ClaudeAgentFarm:
         fast_start: bool = False,
         full_backup: bool = False,
         commit_every: Optional[int] = None,
+        agent_type: str = "claude_code",
+        agent_command: str = "cc",
     ):
         # Store all parameters
         self.path = path
@@ -651,6 +653,8 @@ class ClaudeAgentFarm:
         self.fast_start = fast_start
         self.full_backup = full_backup
         self.commit_every = commit_every
+        self.agent_type = agent_type
+        self.agent_command = agent_command
 
         # Multi-agent config support
         self.agent_configs = None
@@ -706,17 +710,17 @@ class ClaudeAgentFarm:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         # ─────────────── Agent instantiation via AgentFactory ─────────────── #
-        from claude_code_agent_farm.agents import AgentFactory
+        from agents import AgentFactory
 
         self.agent_objects = []
         if self.agent_configs:
             for cfg in self.agent_configs:
-                agent_type = cfg.get("type", "claude_code")
+                agent_type = cfg.get("type", cfg.get("agent_type", self.agent_type))
                 self.agent_objects.append(AgentFactory.create_agent(agent_type, **cfg))
         else:
-            # Single-agent backward compatibility
+            # Single-agent backward compatibility - use configured agent_type
             for i in range(self.agents):
-                self.agent_objects.append(AgentFactory.create_agent("claude_code"))
+                self.agent_objects.append(AgentFactory.create_agent(self.agent_type))
 
     def _load_config(self, config_path: str) -> None:
         """Load settings from JSON config file, supporting multi-agent configs"""
@@ -1693,9 +1697,21 @@ class ClaudeAgentFarm:
         time.sleep(2.0)
 
         # Launch agent using agent-specific control if available
-        launch_cmd = "cc"
+        launch_cmd = self.agent_command
         if agent_cfg and "command" in agent_cfg:
             launch_cmd = agent_cfg["command"]
+        elif agent_cfg and agent_cfg.get("agent_type") == "open_code":
+            launch_cmd = "opencode"
+            # Add model selection for OpenCode
+            model = agent_cfg.get("model", "github-copilot/gpt-4.1")
+            launch_cmd = f"opencode --model {model}"
+        elif agent_cfg and agent_cfg.get("type") == "open_code":
+            launch_cmd = "opencode"
+            # Add model selection for OpenCode
+            model = agent_cfg.get("model", "github-copilot/gpt-4.1")
+            launch_cmd = f"opencode --model {model}"
+        elif self.agent_type == "open_code":
+            launch_cmd = "opencode --model github-copilot/gpt-4.1"
         if agent_cfg:
             env_vars = agent_cfg.get("env", {})
             flags = agent_cfg.get("flags", "")
@@ -1718,7 +1734,7 @@ class ClaudeAgentFarm:
         lock_acquired = True
         try:
             if agent_obj:
-                agent_obj.control("start", pane=pane_target, command=launch_cmd)
+                agent_obj.control(launch_cmd, pane=pane_target)
             else:
                 tmux_send(pane_target, launch_cmd)
             wait_after_cc = self.wait_after_cc
@@ -1780,7 +1796,7 @@ class ClaudeAgentFarm:
                             if self._acquire_claude_lock(timeout=10.0):
                                 try:
                                     if agent_obj:
-                                        agent_obj.control("start", pane=pane_target, command=launch_cmd)
+                                        agent_obj.control(launch_cmd, pane=pane_target)
                                     else:
                                         tmux_send(pane_target, launch_cmd)
                                     time.sleep(wait_after_cc)
