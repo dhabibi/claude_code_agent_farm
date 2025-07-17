@@ -8,7 +8,7 @@
 
 ## 🎯 What is this?
 
-Claude Code Agent Farm is a powerful orchestration framework that runs multiple Claude Code (`cc`) sessions in parallel to systematically improve your codebase. It supports multiple technology stacks and workflow types, allowing teams of AI agents to work together on large-scale code improvements.
+Claude Code Agent Farm is a powerful orchestration framework that runs multiple AI code agents in parallel to systematically improve your codebase. It supports multiple technology stacks and workflow types, allowing teams of Claude Code, OpenCode, and future agent types to work together on large-scale code improvements.
 
 ### Key Features
 
@@ -190,6 +190,15 @@ Additional setup scripts are available for:
 - 🛡️ **Non-Destructive**: Won't overwrite configurations without permission
 - 🐚 **Shell Agnostic**: Works with both bash and zsh
 - 📊 **Progress Tracking**: Shows what's installed and what's pending
+
+## 🧑‍🤝‍🧑 Agent Types & Extensible Architecture
+
+Claude Code Agent Farm supports multiple agent types:
+- **Claude Code Agents**: The original agent type, optimized for code improvement and bug fixing.
+- **OpenCode Agents**: Experimental support for OpenCode agents (see configuration options below).
+- **Extensible Architecture**: The system is designed to support future agent types. To add a new agent, create a configuration file and prompt template for the agent, then specify the agent type in your config.
+
+Backward compatibility is maintained for existing users—Claude Code agents remain the default and all previous workflows continue to work unchanged.
 
 ## 📖 Understanding the Architecture
 
@@ -423,6 +432,19 @@ Create your own configuration:
 ```
 
 ## ⚙️ Configuration System
+
+### Agent Type Configuration
+
+Specify agent types in your configuration file:
+```json
+{
+  "agent_type": "claude_code", // Options: "claude_code", "opencode", "future_agent"
+  "agents": 10,
+  ...
+}
+```
+If omitted, "claude_code" is used by default for backward compatibility.
+
 
 ### Core Configuration Options
 
@@ -855,6 +877,9 @@ claude-code-agent-farm \
 ```
 
 ### Cooperating Agents Mode
+
+Supports both Claude Code and OpenCode agents (or mixed teams). Specify agent types in your config for advanced multi-agent coordination.
+
 ```bash
 # Advanced multi-agent coordination for complex improvements
 claude-code-agent-farm \
@@ -1102,6 +1127,10 @@ Contributions welcome! Please:
 5. Test thoroughly with various project types
 6. Update this README with your addition
 
+## 🧩 Backward Compatibility
+
+All existing workflows and configuration files remain fully supported. If no agent type is specified, the system defaults to Claude Code agents. New agent types can be added without breaking existing setups.
+
 ## 👨‍💻 Author
 
 Created by Jeffrey Emanuel (jeffrey.emanuel@gmail.com)
@@ -1148,6 +1177,12 @@ MIT License - see [LICENSE](LICENSE) file
 ---
 
 *Happy farming! 🚜 May your code be clean and your agents productive.*
+
+---
+
+**Multi-Agent Extensibility:**
+Claude Code Agent Farm is built for extensibility. To add new agent types, simply create a configuration and prompt template for your agent, and update your config to include the new type. The architecture is future-proofed for evolving agent ecosystems.
+
 
 ## 📊 Quick Reference
 

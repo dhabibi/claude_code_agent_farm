@@ -220,11 +220,13 @@ class AgentMonitor:
         idle_timeout: int = 60,
         max_errors: int = 3,
         project_path: Optional[Path] = None,
+        agent_objects: Optional[List[Any]] = None,
     ):
         self.session = session
         self.num_agents = num_agents
         self.pane_mapping = pane_mapping
         self.agents: Dict[int, Dict] = {}
+        self.agent_objects = agent_objects or []
         self.running = True
         self.start_time = datetime.now()
         self.context_threshold = context_threshold
@@ -259,6 +261,7 @@ class AgentMonitor:
                 "last_restart": None,
                 "last_heartbeat": None,
                 "cycle_start_time": None,
+                "agent_obj": self.agent_objects[i] if i < len(self.agent_objects) else None,
             }
 
     def calculate_adaptive_timeout(self) -> int:
@@ -391,17 +394,25 @@ class AgentMonitor:
         return any(indicator in content for indicator in error_indicators)
 
     def check_agent(self, agent_id: int) -> Dict:
-        """Check status of a single agent"""
+        """Check status of a single agent using agent-specific detection"""
         pane_target = self.pane_mapping.get(agent_id)
         if not pane_target:
             console.print(f"[red]Error: No pane mapping found for agent {agent_id}[/red]")
             return self.agents[agent_id]
 
         content = tmux_capture(pane_target)
-
         agent = self.agents[agent_id]
+        agent_obj = agent.get("agent_obj", None)
 
-        # Update context percentage
+        # Agent-specific detection pattern
+        if agent_obj:
+            detect_result = agent_obj.detect(content)
+            # Optionally use detect_result to update agent status/context
+            if isinstance(detect_result, dict):
+                agent["status"] = detect_result.get("status", agent["status"])
+                agent["last_context"] = detect_result.get("context", agent["last_context"])
+
+        # Update context percentage (fallback for ClaudeCodeAgent)
         context = self.detect_context_percentage(content)
         if context is not None:
             agent["last_context"] = context
@@ -416,47 +427,30 @@ class AgentMonitor:
             
             # Update status based on activity
             if self.is_claude_working(content):
-                # If transitioning to working, record cycle start time
                 if prev_status != "working" and agent["cycle_start_time"] is None:
                     agent["cycle_start_time"] = datetime.now()
-                
                 agent["status"] = "working"
                 agent["last_activity"] = datetime.now()
-                # Update heartbeat when agent is actively working
                 self._update_heartbeat(agent_id)
             elif self.is_claude_ready(content):
-                # If transitioning from working to ready, record cycle time
                 if prev_status == "working" and agent["cycle_start_time"] is not None:
                     cycle_time = (datetime.now() - agent["cycle_start_time"]).total_seconds()
                     self.cycle_times.append(cycle_time)
-                    
-                    # Keep only recent cycle times
                     if len(self.cycle_times) > self.max_cycle_history:
                         self.cycle_times.pop(0)
-                    
-                    # Update adaptive timeout
                     self.calculate_adaptive_timeout()
-                    
-                    # Reset cycle start time
                     agent["cycle_start_time"] = None
-                    
-                    # Increment cycle count
                     agent["cycles"] += 1
-                
-                # Check if idle for too long
                 idle_time = (datetime.now() - agent["last_activity"]).total_seconds()
                 if idle_time > self.idle_timeout:
                     agent["status"] = "idle"
                 else:
                     agent["status"] = "ready"
-                    # Update heartbeat when agent is ready (not idle)
                     self._update_heartbeat(agent_id)
             else:
                 agent["status"] = "unknown"
         
-        # Update tmux pane title with context information
         self._update_pane_title(agent_id, agent)
-
         return agent
     
     def _update_pane_title(self, agent_id: int, agent: Dict) -> None:
@@ -616,8 +610,8 @@ class ClaudeAgentFarm:
         path: str,
         agents: int = 6,
         session: str = "claude_agents",
-        stagger: float = 10.0,  # Increased from 4.0 to prevent settings clobbering
-        wait_after_cc: float = 15.0,  # Increased from 8.0 to ensure Claude Code is fully ready
+        stagger: float = 10.0,
+        wait_after_cc: float = 15.0,
         check_interval: int = 10,
         skip_regenerate: bool = False,
         skip_commit: bool = False,
@@ -658,12 +652,15 @@ class ClaudeAgentFarm:
         self.full_backup = full_backup
         self.commit_every = commit_every
 
+        # Multi-agent config support
+        self.agent_configs = None
+
         # Initialize pane mapping
         self.pane_mapping: Dict[int, str] = {}
-        
+
         # Track regeneration cycles for incremental commits
         self.regeneration_cycles = 0
-        
+
         # Track run statistics for reporting
         self.run_start_time = datetime.now()
         self.total_problems_fixed = 0
@@ -680,7 +677,9 @@ class ClaudeAgentFarm:
         if config:
             self._load_config(config)
 
-        # Validate agent count
+        # Validate agent count (use agent_configs if present)
+        if self.agent_configs:
+            self.agents = len(self.agent_configs)
         if self.agents > getattr(self, "max_agents", 50):
             raise ValueError(f"Agent count {self.agents} exceeds maximum {getattr(self, 'max_agents', 50)}")
 
@@ -706,15 +705,37 @@ class ClaudeAgentFarm:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+        # ─────────────── Agent instantiation via AgentFactory ─────────────── #
+        from claude_code_agent_farm.agents import AgentFactory
+
+        self.agent_objects = []
+        if self.agent_configs:
+            for cfg in self.agent_configs:
+                agent_type = cfg.get("type", "claude_code")
+                self.agent_objects.append(AgentFactory.create_agent(agent_type, **cfg))
+        else:
+            # Single-agent backward compatibility
+            for i in range(self.agents):
+                self.agent_objects.append(AgentFactory.create_agent("claude_code"))
+
     def _load_config(self, config_path: str) -> None:
-        """Load settings from JSON config file"""
+        """Load settings from JSON config file, supporting multi-agent configs"""
         config_file = Path(config_path)
         if config_file.exists():
             with config_file.open() as f:
                 config_data = json.load(f)
-                # Accept all config values, not just existing attributes
-                for key, value in config_data.items():
-                    setattr(self, key, value)
+                # Multi-agent config: "agents" key is a list of agent configs
+                if "agents" in config_data and isinstance(config_data["agents"], list):
+                    self.agent_configs = config_data["agents"]
+                    # Fallback for global settings
+                    for key, value in config_data.items():
+                        if key != "agents":
+                            setattr(self, key, value)
+                else:
+                    # Legacy config: flat/global settings
+                    self.agent_configs = None
+                    for key, value in config_data.items():
+                        setattr(self, key, value)
 
     def _signal_handler(self, sig: Any, frame: Any) -> None:
         """Handle shutdown signals gracefully with force-kill on double tap"""
@@ -1642,36 +1663,51 @@ class ClaudeAgentFarm:
             return False
 
     def start_agent(self, agent_id: int, restart: bool = False) -> None:
-        """Start or restart a single agent"""
+        """Start or restart a single agent, supporting agent-specific config and control"""
         pane_target = self.pane_mapping.get(agent_id)
         if not pane_target:
             console.print(f"[red]Error: No pane mapping found for agent {agent_id}[/red]")
             return
 
+        # Get agent-specific config if available
+        agent_cfg = None
+        if self.agent_configs and agent_id < len(self.agent_configs):
+            agent_cfg = self.agent_configs[agent_id]
+
+        agent_obj = self.agent_objects[agent_id] if agent_id < len(self.agent_objects) else None
+
+        # Handle restart logic
         if restart:
-            # Exit current session
-            tmux_send(pane_target, "/exit")
-            # Wait for shell prompt to appear
+            if agent_obj:
+                agent_obj.control("restart", pane=pane_target)
+            else:
+                tmux_send(pane_target, "/exit")
             if not self._wait_for_shell_prompt(pane_target, timeout=15):
                 console.print(f"[yellow]Warning: Agent {agent_id} pane slow to return to shell prompt[/yellow]")
-
             if self.monitor:
                 self.monitor.agents[agent_id]["cycles"] += 1
 
-        # Navigate and start Claude Code
-        # Quote the path so directories with spaces or shell metacharacters work
+        # Change directory (can be agent-specific if needed)
         tmux_send(pane_target, f"cd {shlex.quote(str(self.project_path))}")
-        
-        # CRITICAL: Wait a couple seconds for cd to complete and shell to stabilize
-        # This prevents race conditions and ensures we're in the right directory
-        console.print(f"[dim]Agent {agent_id:02d}: Waiting 2s after cd before launching cc...[/dim]")
+        console.print(f"[dim]Agent {agent_id:02d}: Waiting 2s after cd before launching agent...[/dim]")
         time.sleep(2.0)
 
-        # Acquire lock before launching cc to prevent config corruption
+        # Launch agent using agent-specific control if available
+        launch_cmd = "cc"
+        if agent_cfg and "command" in agent_cfg:
+            launch_cmd = agent_cfg["command"]
+        if agent_cfg:
+            env_vars = agent_cfg.get("env", {})
+            flags = agent_cfg.get("flags", "")
+            if env_vars:
+                env_str = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env_vars.items())
+                launch_cmd = f"{env_str} {launch_cmd}"
+            if flags:
+                launch_cmd = f"{launch_cmd} {flags}"
+
         lock_acquired = False
         if not self._acquire_claude_lock(timeout=10.0):
-            console.print(f"[yellow]Agent {agent_id:02d}: Waiting for lock to launch cc...[/yellow]")
-            # Try once more with longer timeout
+            console.print(f"[yellow]Agent {agent_id:02d}: Waiting for lock to launch agent...[/yellow]")
             if not self._acquire_claude_lock(timeout=20.0):
                 console.print(f"[red]Agent {agent_id:02d}: Could not acquire lock - aborting launch[/red]")
                 if self.monitor:
@@ -1681,155 +1717,127 @@ class ClaudeAgentFarm:
 
         lock_acquired = True
         try:
-            tmux_send(pane_target, "cc")
-
+            if agent_obj:
+                agent_obj.control("start", pane=pane_target, command=launch_cmd)
+            else:
+                tmux_send(pane_target, launch_cmd)
+            wait_after_cc = self.wait_after_cc
+            if agent_cfg and "wait_after_cc" in agent_cfg:
+                try:
+                    wait_after_cc = float(agent_cfg["wait_after_cc"])
+                except Exception:
+                    pass
             if not restart:
-                console.print(f"🛠  Agent {agent_id:02d}: launching cc, waiting {self.wait_after_cc}s...")
-
-            # Make wait_after_cc interruptible
-            for _ in range(int(self.wait_after_cc * 5)):
+                console.print(f"🛠  Agent {agent_id:02d}: launching {launch_cmd}, waiting {wait_after_cc}s...")
+            for _ in range(int(wait_after_cc * 5)):
                 if not self.running:
                     return
                 time.sleep(0.2)
         finally:
-            # Always release lock
             if lock_acquired:
                 self._release_claude_lock()
 
-        # Verify Claude Code started successfully
+        # Verify agent started successfully
         max_retries = 5
-        claude_started_successfully = False
-
-        # Give Claude Code a bit more time to fully initialize before first check
+        agent_started_successfully = False
         time.sleep(2.0)
-
         for attempt in range(max_retries):
             if not self.running:
                 return
-
             content = tmux_capture(pane_target)
-
-            # Debug log for troubleshooting startup detection
-            if attempt == 0 and len(content.strip()) > 0:
-                console.print(f"[dim]Agent {agent_id:02d}: Captured {len(content)} chars, checking readiness...[/dim]")
-                # Log key indicators for debugging
-                if "Welcome to Claude Code!" in content:
-                    console.print(f"[dim]Agent {agent_id:02d}: Found welcome message[/dim]")
-                if "│ >" in content:
-                    console.print(f"[dim]Agent {agent_id:02d}: Found prompt box[/dim]")
-                if "? for shortcuts" in content:
-                    console.print(f"[dim]Agent {agent_id:02d}: Found shortcuts hint[/dim]")
-
-            # Check for various failure conditions
-            if not content or len(content.strip()) < 10:
-                # Empty or nearly empty content indicates cc didn't start
-                console.print(
-                    f"[yellow]Agent {agent_id:02d}: No output from Claude Code yet (attempt {attempt + 1}/{max_retries})[/yellow]"
-                )
+            if agent_obj:
+                detect_result = agent_obj.detect(content)
+                if detect_result and detect_result.get("status") == "active":
+                    agent_started_successfully = True
+                    break
             elif self.monitor and self.monitor.is_claude_ready(content):
-                # Check for readiness FIRST before checking for errors
-                claude_started_successfully = True
+                agent_started_successfully = True
                 break
             elif self.monitor and len(content.strip()) > 100 and (
                 self.monitor.has_settings_error(content) or self.monitor.has_welcome_screen(content)
             ):
-                # Only check for errors if we have substantial content (>100 chars)
                 console.print(
                     f"[red]Agent {agent_id:02d}: Settings error/setup screen detected - attempting restore[/red]"
                 )
-
-                # Kill this cc instance more forcefully
-                console.print(f"[yellow]Agent {agent_id:02d}: Killing corrupted Claude Code instance...[/yellow]")
-                tmux_send(pane_target, "\x03")  # Ctrl+C
+                console.print(f"[yellow]Agent {agent_id:02d}: Killing corrupted agent instance...[/yellow]")
+                tmux_send(pane_target, "\x03")
                 time.sleep(0.5)
-                tmux_send(pane_target, "\x03")  # Send Ctrl+C again to be sure
+                tmux_send(pane_target, "\x03")
                 time.sleep(0.5)
-                
-                # Send exit command in case it's still in Claude Code
                 tmux_send(pane_target, "/exit")
                 time.sleep(1.0)
-                
-                # Wait for shell prompt to ensure Claude Code has fully exited
                 if not self._wait_for_shell_prompt(pane_target, timeout=10, ignore_shutdown=True):
-                    # If still not at shell, try harder
-                    tmux_send(pane_target, "\x03")  # Another Ctrl+C
+                    tmux_send(pane_target, "\x03")
                     time.sleep(1.0)
-                    tmux_send(pane_target, "exit")  # Try shell exit command
+                    tmux_send(pane_target, "exit")
                     time.sleep(1.0)
-                
-                # NEVER EVER kill all claude-code processes! This would kill ALL working agents!
-                # Just let this specific instance clean up naturally
-                time.sleep(2.0)  # Give time for this instance to fully exit
-
-                # Try to restore from backup
-                if hasattr(self, "settings_backup_path") and self.settings_backup_path:  # noqa: SIM102
+                time.sleep(2.0)
+                if hasattr(self, "settings_backup_path") and self.settings_backup_path:
                     if self._restore_claude_settings():
                         console.print(f"[green]Settings restored for agent {agent_id} - retrying launch[/green]")
-                        # Wait a bit more to ensure everything is settled
                         time.sleep(2.0)
-                        
-                        # Return to shell and retry
                         if self._wait_for_shell_prompt(pane_target, timeout=10, ignore_shutdown=True):
-                            # Re-acquire lock before retrying
                             if self._acquire_claude_lock(timeout=10.0):
                                 try:
-                                    tmux_send(pane_target, "cc")
-                                    time.sleep(self.wait_after_cc)
+                                    if agent_obj:
+                                        agent_obj.control("start", pane=pane_target, command=launch_cmd)
+                                    else:
+                                        tmux_send(pane_target, launch_cmd)
+                                    time.sleep(wait_after_cc)
                                 finally:
                                     self._release_claude_lock()
-                                # Continue to next iteration to check again
                                 continue
                             else:
                                 console.print(f"[red]Agent {agent_id:02d}: Could not acquire lock for retry[/red]")
                         else:
                             console.print(f"[red]Agent {agent_id:02d}: Could not get shell prompt for retry[/red]")
-
                 if self.monitor:
                     self.monitor.agents[agent_id]["status"] = "error"
                     self.monitor.agents[agent_id]["errors"] += 1
                 return
             elif "command not found" in content and "cc" in content:
-                # cc command doesn't exist
                 console.print(f"[red]Agent {agent_id:02d}: 'cc' command not found[/red]")
                 if self.monitor:
                     self.monitor.agents[agent_id]["status"] = "error"
                     self.monitor.agents[agent_id]["errors"] += 1
                 return
             elif attempt < max_retries - 1:
-                # Make this sleep interruptible too
-                for _ in range(25):  # 5 seconds in 0.2s intervals
+                for _ in range(25):
                     if not self.running:
                         return
                     time.sleep(0.2)
             else:
                 console.print(
-                    f"[red]Agent {agent_id:02d}: Claude Code failed to start properly after {max_retries} attempts[/red]"
+                    f"[red]Agent {agent_id:02d}: Agent failed to start properly after {max_retries} attempts[/red]"
                 )
                 if self.monitor:
                     self.monitor.agents[agent_id]["status"] = "error"
                     self.monitor.agents[agent_id]["errors"] += 1
                 return
 
-        # Only send prompt if Claude Code started successfully
-        if not claude_started_successfully:
-            console.print(f"[red]Agent {agent_id:02d}: Skipping prompt injection - Claude Code not ready[/red]")
+        if not agent_started_successfully:
+            console.print(f"[red]Agent {agent_id:02d}: Skipping prompt injection - agent not ready[/red]")
             return
 
-        # Send prompt with unique seed for randomization
-        seed = randint(100000, 999999)
-        
-        # Calculate dynamic chunk size and update prompt text if needed
-        dynamic_chunk_size = self._calculate_dynamic_chunk_size()
+        # Agent-specific prompt file support
+        prompt_file = None
+        if agent_cfg and "prompt_file" in agent_cfg:
+            prompt_file = agent_cfg["prompt_file"]
         current_prompt = self.prompt_text
-        
-        # If dynamic chunk size differs from configured, update the prompt
+        if prompt_file:
+            prompt_path = Path(prompt_file)
+            if prompt_path.exists():
+                prompt_text = prompt_path.read_text().strip()
+                if prompt_text:
+                    current_prompt = prompt_text
+
+        seed = randint(100000, 999999)
+        dynamic_chunk_size = self._calculate_dynamic_chunk_size()
         configured_chunk = getattr(self, 'chunk_size', 50)
         if dynamic_chunk_size != configured_chunk:
             current_prompt = current_prompt.replace(f'{{{configured_chunk}}}', f'{{{dynamic_chunk_size}}}')
             current_prompt = current_prompt.replace(f'{configured_chunk}', str(dynamic_chunk_size))
-            console.print(f"[dim]Agent {agent_id:02d}: Dynamic chunk size: {dynamic_chunk_size} (was {configured_chunk})[/dim]")
-        
-        # Use regex to handle variations like "random chunks of 50 lines"
+        console.print(f"[dim]Agent {agent_id:02d}: Dynamic chunk size: {dynamic_chunk_size} (was {configured_chunk})[/dim]")
         salted_prompt = re.sub(
             r"random chunks(\b.*?\b)?",
             lambda m: f"{m.group(0)} (instance-seed {seed})",
@@ -1837,27 +1845,26 @@ class ClaudeAgentFarm:
             count=1,
             flags=re.IGNORECASE,
         )
-
-        # Send prompt as a single message
-        # CRITICAL: Use tmux's literal mode to send the entire prompt correctly
-        # This avoids complex line-by-line sending that can cause issues
         prompt_preview = textwrap.shorten(salted_prompt.replace('\n', ' '), width=50, placeholder="...")
         console.print(f"[dim]Agent {agent_id:02d}: Sending {len(salted_prompt)} chars: {prompt_preview}[/dim]")
-        
-        # Send the entire prompt at once using literal mode
-        tmux_send(pane_target, salted_prompt, enter=True)
-
+        if agent_obj:
+            agent_obj.control("inject_prompt", pane=pane_target, prompt=salted_prompt)
+        else:
+            tmux_send(pane_target, salted_prompt, enter=True)
         if not restart:
             console.print(f"[green]✓ Agent {agent_id:02d}: prompt injected[/green]")
-
-        # Verify prompt was received by checking for working state
-        time.sleep(2.0)  # Give Claude a moment to start processing
+        time.sleep(2.0)
         verify_content = tmux_capture(pane_target)
-        if self.monitor and self.monitor.is_claude_working(verify_content):
+        if agent_obj:
+            detect_result = agent_obj.detect(verify_content)
+            if detect_result and detect_result.get("status") == "active":
+                console.print(f"[green]✓ Agent {agent_id:02d}: Agent is processing the prompt[/green]")
+            else:
+                console.print(f"[yellow]⚠ Agent {agent_id:02d}: Agent may not have received the prompt properly[/yellow]")
+        elif self.monitor and self.monitor.is_claude_working(verify_content):
             console.print(f"[green]✓ Agent {agent_id:02d}: Claude Code is processing the prompt[/green]")
         else:
             console.print(f"[yellow]⚠ Agent {agent_id:02d}: Claude Code may not have received the prompt properly[/yellow]")
-
         if self.monitor:
             self.monitor.agents[agent_id]["status"] = "starting"
             self.monitor.agents[agent_id]["last_activity"] = datetime.now()
@@ -2039,6 +2046,7 @@ class ClaudeAgentFarm:
                 idle_timeout=self.idle_timeout,
                 max_errors=self.max_errors,
                 project_path=self.project_path,
+                agent_objects=self.agent_objects,
             )
 
             # Launch agents
@@ -2388,6 +2396,12 @@ def main(
     agents: int = typer.Option(
         20, "--agents", "-n", help="Number of Claude agents", rich_help_panel="Agent Configuration"
     ),
+    agent_type: str = typer.Option(
+        "claude_code", "--agent-type", help="Type of agent to launch (claude_code, open_code, etc.)", rich_help_panel="Agent Configuration"
+    ),
+    agent_command: str = typer.Option(
+        "cc", "--agent-command", help="Command to launch agent (default: cc)", rich_help_panel="Agent Configuration"
+    ),
     session: str = typer.Option(
         "claude_agents", "--session", "-s", help="tmux session name", rich_help_panel="Agent Configuration"
     ),
@@ -2504,6 +2518,8 @@ def main(
         fast_start=fast_start,
         full_backup=full_backup,
         commit_every=commit_every,
+        agent_type=agent_type,
+        agent_command=agent_command,
     )
 
     try:
@@ -2609,8 +2625,10 @@ def monitor_only(
 @app.command(name="doctor")
 def doctor(
     path: Optional[str] = typer.Option(None, "--path", help="Project path to check (optional)"),
+    agent_type: Optional[str] = typer.Option(None, "--agent-type", help="Type of agent to validate (optional)"),
+    agent_command: Optional[str] = typer.Option(None, "--agent-command", help="Agent launch command to validate (optional)"),
 ) -> None:
-    """Pre-flight verifier to check system configuration and catch common setup errors"""
+    """Pre-flight verifier to check system configuration and catch common setup errors, including multi-agent setups"""
     console.print(
         Panel.fit(
             "[bold cyan]Claude Agent Farm Doctor[/bold cyan]\nChecking system configuration...",
@@ -2753,6 +2771,29 @@ def doctor(
             config_files = list(project_path.glob("configs/*.json"))
             if config_files:
                 console.print(f"  ✅ Found {len(config_files)} config files")
+                # Multi-agent config validation
+                for cfg_file in config_files:
+                    try:
+                        with cfg_file.open() as f:
+                            cfg_data = json.load(f)
+                        if "agents" in cfg_data and isinstance(cfg_data["agents"], list):
+                            console.print(f"     - Multi-agent config detected in {cfg_file.name} ({len(cfg_data['agents'])} agents)")
+                            for idx, agent_cfg in enumerate(cfg_data["agents"]):
+                                atype = agent_cfg.get("type", "claude_code")
+                                acmd = agent_cfg.get("command", "cc")
+                                console.print(f"       Agent {idx+1}: type={atype}, command={acmd}")
+                                # Validate agent type and command if provided
+                                if agent_type and atype != agent_type:
+                                    console.print(f"       ⚠️  Agent type mismatch: expected {agent_type}, found {atype}")
+                                    warnings_found += 1
+                                if agent_command and acmd != agent_command:
+                                    console.print(f"       ⚠️  Agent command mismatch: expected {agent_command}, found {acmd}")
+                                    warnings_found += 1
+                        else:
+                            console.print(f"     - Single-agent config in {cfg_file.name}")
+                    except Exception as e:
+                        console.print(f"     ⚠️  Error reading {cfg_file.name}: {e}")
+                        warnings_found += 1
             else:
                 console.print("  ⚠️  No config files found in configs/")
                 warnings_found += 1
